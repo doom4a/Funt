@@ -1,0 +1,19 @@
+# Virtual env
+myenv/
+
+# Secrets
+.env
+Backup/.env
+
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Logs
+log.txt
+*.log
+
+# OS / editor junk
+.DS_Store
+.idea/
+.vscode/
