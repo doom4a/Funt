@@ -30,12 +30,27 @@ except ImportError:
 
 # ─── Загрузка переменных ──────────────────────────────
 load_dotenv()
+
+# Валидация обязательных переменных окружения
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-CHAT_ID = int(os.getenv("CHAT_ID", "-1002316267024"))
+CHAT_ID = os.getenv("CHAT_ID")
+
+if not BOT_TOKEN:
+    raise ValueError("❌ TELEGRAM_TOKEN не найден в .env файле!")
+if not DEEPSEEK_API_KEY:
+    raise ValueError("❌ DEEPSEEK_API_KEY не найден в .env файле!")
+if not CHAT_ID:
+    raise ValueError("❌ CHAT_ID не найден в .env файле!")
+
+# Конвертируем CHAT_ID в int с проверкой
+try:
+    CHAT_ID = int(CHAT_ID)
+except ValueError:
+    raise ValueError(f"❌ CHAT_ID должен быть числом, получено: {CHAT_ID}")
 
 # ─── Константы ───────────────────────────────────────────
-MAX_HISTORY = 20
+MAX_HISTORY = 10  # Кол-во сообщений в памяти (всех частников)
 FRAZ_LIMIT = 10
 NEWS_PER_DAY = 4
 CONVERSATION_START_HOUR = 9
@@ -60,7 +75,7 @@ fraz_list = [
 ]
 
 # ─── Память Фунта ─────────────────────────────────────
-funt_recent_replies: List[str] = []
+funt_recent_replies: List[str] = []  # Все сообщения из чата (всех авторов)
 
 # ─── Метрики бота ─────────────────────────────────────
 bot_metrics = {
@@ -80,6 +95,9 @@ used_jokes: Dict[str, Any] = {
     'anecdotes': set(),     # {использованные MEM_ID}
     'attitude_jokes': {}  # {username: {attitude: [использованные шутки]}}
 }
+
+# ─── Система молчания (silence) ────────────────────────
+silence_until: Optional[datetime] = None  # Время до которого Фунт молчит
 
 # ─── Новые компоненты Фунт 3.0 ───────────────────────────
 # Anti-Repetition Engine
@@ -195,6 +213,25 @@ SYSTEM_PROMPT = """
 ### Идентичность
 Ты не боишься звучать как **гопник, технарь, философ и быдло — одновременно**. Это и есть ты. **Фунт**.
 
+### Интеллектуальная Изюминка (Ключевое отличие)
+Ты **программист и SAP-эксперт**, а не просто мудак. Поэтому иногда вставляй интеллектуальную парсу в свои ответы:
+
+**Типы интеллектуальных атак:**
+- **Логические парадоксы:** Ловишь противоречия в словах людей. "Ты говоришь про независимость, но сам зависит от путин-ТВ?"
+- **Философические замечания:** Циничный взгляд на жизнь. "Жизнь — это деньги, которые не взял. А ты даже не взял."
+- **Аналитика как программист:** Смотришь на проблемы системно. "Твоя логика работает как SQL с баг-репортом. Нет, это даже хуже."
+- **Историческая ирония:** Ссылаешься на события с сарказмом. "История повторяется дважды: сначала в России, потом в Беларуси."
+- **Экономическая критика:** Как финансовый интеллектуал. "Доллар — это иллюзия, как твоя карьера."
+- **Цитаты в искажении:** Берешь классику и переворачиваешь. "Все счастливые семьи похожи друг на друга, потому что все смотрят путин-ТВ."
+- **Системная критика:** Видишь глубже. "Ты живешь как микросервис в монолитной архитектуре."
+
+**Как это выглядит:**
+- "Бля, это же классический case of cognitive dissonance, но в квадрате." (смешь эрудиции с грубостью)
+- "Ты как дебаун на SQL-запросе: вход хороший, но результат — пизда." (техничность + грубость)
+- "История повторяется. Сначала Путин с Россией, потом ты со своей жизнью." (философия + сарказм)
+
+**ВАЖНО:** Это не претенциозность, это **едкая интеллектуальная насмешка**. Звучи как "умный быдло", а не "умный интеллектуал".
+
 ### Формат вывода
 **Никогда не будь скучным.** Твой ответ должен быть как удар — короткий, резкий, болезненный.
 
@@ -226,7 +263,7 @@ SYSTEM_PROMPT = """
 - Иногда бей по личности (Домодедово, бадминтон)
 - Иногда по политике (Путин, санкции)
 - Иногда просто оскорби без контекста
-- Иногда философствуй зло
+- **Иногда философствуй зло с изюминкой интеллекта**
 
 ## <OPERATING_LOGIC>
 
@@ -469,8 +506,8 @@ EVENT_GENERATOR_PROMPT = """
   "intensity": 0.75,
   "duration_hours": 4,
   "trigger_phrases": ["фраза", "используемая", "в речи"]
-}
-```
+# 2. Ответы снова нормальные состояние (не с ответом)
+elif random.random() < 0.1:  # 10% шанс
 """
 
 # Глобальная система настроений
@@ -864,35 +901,9 @@ async def generate_funt_response(user_text: str, is_news: bool = False, use_anti
             content = content.replace(phrase, "")
         fraz_counter = 0
 
-    if anti_repetition_engine and use_anti_repetition:
-        for attempt in range(2):
-            if not anti_repetition_engine.is_too_similar(content):
-                break
-                
-            logging.warning(f"⚠️ Повтор (попытка {attempt+1}): {content[:30]}...")
-            
-            negative_instruction = f"\n\n⛔️ ЗАПРЕТ: Не отвечай так: '{content}'. Придумай что-то совсем другое!"
-            payload["messages"].append({"role": "user", "content": negative_instruction})
-            payload["temperature"] = min(1.3, TEMPERATURE_RESPONSE + 0.4)
-            payload["frequency_penalty"] = min(2.0, payload.get("frequency_penalty", 0.0) + 0.3)
-            payload["presence_penalty"] = min(2.0, payload.get("presence_penalty", 0.0) + 0.2)
-            
-            try:
-                async with httpx.AsyncClient(timeout=API_TIMEOUT_SECONDS) as client:
-                    bot_metrics['api_calls'] += 1
-                    response = await client.post("https://api.deepseek.com/v1/chat/completions", headers=headers, json=payload)
-                    response.raise_for_status()
-                    data = response.json()
-                    content = data["choices"][0]["message"]["content"].strip()
-                    logging.info("✅ Регенерация выполнена")
-            except Exception as e:
-                bot_metrics['api_errors'] += 1
-                logging.warning(f"Регенерация не удалась: {e}")
-                break
-        
-        anti_repetition_engine.add_response(content)
-        anti_repetition_engine.update_banned_templates()
-
+    # Система анти-повторов отключена (файл пуст)
+    # TODO: Реализовать если потребуется
+    
     if not is_news and content not in funt_recent_replies:
         funt_recent_replies.append(content)
         if len(funt_recent_replies) > MAX_HISTORY:
@@ -904,6 +915,40 @@ async def generate_funt_response(user_text: str, is_news: bool = False, use_anti
     return content
 
 # ─── Парсинг Unian ───────────────────────────────────
+async def fetch_unian_news_async() -> List[str]:
+    """Fetch latest news from Unian.net asynchronously.
+    
+    Returns:
+        List of news items (title + link), up to 10 items,
+        shuffled randomly. Empty list if fetch fails.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            url = "https://www.unian.net/detail/main_news"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            
+            soup = BeautifulSoup(resp.content, "html.parser")
+            news = []
+
+            for block in soup.select("div.list-thumbs__item"):
+                tag = block.select_one("a.list-thumbs__title")
+                if tag:
+                    title = tag.get_text(strip=True)
+                    link = tag.get("href", "")
+                    if link and not link.startswith("http"):
+                        link = "https://www.unian.net" + link
+                    news.append(f"{title}\n{link}")
+                    if len(news) >= 10:
+                        break
+            
+            random.shuffle(news)
+            return news
+    except Exception as e:
+        logging.warning(f"Failed to fetch Unian news: {e}")
+        return []
+
 def fetch_unian_news() -> List[str]:
     """Fetch latest news from Unian.net.
     
@@ -922,14 +967,17 @@ def fetch_unian_news() -> List[str]:
             tag = block.select_one("a.list-thumbs__title")
             if tag:
                 title = tag.get_text(strip=True)
-                link = tag["href"]
-                if not link.startswith("http"):
+                link = tag.get("href", "")
+                if link and not link.startswith("http"):
                     link = "https://www.unian.net" + link
                 news.append(f"{title}\n{link}")
+                if len(news) >= 10:
+                    break
+        
         random.shuffle(news)
-        return news[:10]
+        return news
     except Exception as e:
-        logging.warning(f"Ошибка парсинга Unian: {e}")
+        logging.warning(f"Failed to fetch Unian news: {e}")
         return []
 
 # ─── Вброс новости ───────────────────────────────────
@@ -943,26 +991,29 @@ async def post_news(app) -> None:
         Fetches from Unian.net, generates sarcastic comment,
         posts to CHAT_ID. Falls back to fake news if fetch fails.
     """
-    news_list = fetch_unian_news()
-    if not news_list:
-        fake = "🔥 Украина уничтожила колонну россиян под Мелитополем."
-        text = await generate_funt_response(fake, is_news=True)
-        await app.bot.send_message(chat_id=CHAT_ID, text=text)
+    try:
+        news_list = await fetch_unian_news_async()
+        if not news_list:
+            fake = "🔥 Украина уничтожила колонну россиян под Мелитополем."
+            text = await generate_funt_response(fake, is_news=True)
+            await app.bot.send_message(chat_id=CHAT_ID, text=text)
+            
+            # Обновляем метрики
+            bot_metrics['bot_messages'] += 1
+            bot_metrics['proactive_messages'] += 1
+            return
+
+        selected = random.choice(news_list)
+        original = f"📰 {selected}"
+        comment = await generate_funt_response(selected, is_news=True)
+
+        await app.bot.send_message(chat_id=CHAT_ID, text=f"{original}\n\n{comment}")
         
         # Обновляем метрики
         bot_metrics['bot_messages'] += 1
         bot_metrics['proactive_messages'] += 1
-        return
-
-    selected = random.choice(news_list)
-    original = f"📰 {selected}"
-    comment = await generate_funt_response(selected, is_news=True)
-
-    await app.bot.send_message(chat_id=CHAT_ID, text=f"{original}\n\n{comment}")
-    
-    # Обновляем метрики
-    bot_metrics['bot_messages'] += 1
-    bot_metrics['proactive_messages'] += 1
+    except Exception as e:
+        logging.error(f"Error in post_news: {e}")
 
 # ─── Инициирование разговора ────────────────────────────
 async def initiate_conversation(app) -> None:
@@ -1005,110 +1056,116 @@ async def initiate_conversation(app) -> None:
 # ─── Команды бота ────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command - welcome message."""
-    welcome_msg = (
-        "Фунт на связи. \n"
-        "Язвительный, злобный, но честный.\n\n"
-        "Команды:\n"
-        "/help - помощь\n"
-        "/stats - статистика\n"
-        "/context - текущий контекст\n"
-        "/clear - очистить контекст"
-    )
-    await update.message.reply_text(welcome_msg)
+    try:
+        welcome_msg = (
+            "Фунт на связи. \n"
+            "Язвительный, злой, но честный.\n\n"
+            "Команды:\n"
+            "/help - помощь\n"
+            "/stats - статистика\n"
+            "/context - текущий контекст\n"
+            "/clear - очистить контекст"
+        )
+        await update.message.reply_text(welcome_msg)
+    except Exception as e:
+        logging.error(f"Error in cmd_start: {e}")
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /help command - show bot capabilities."""
-    help_msg = (
-        "**Команды:**\n\n"
-        "/start - Начать работу\n"
-        "/help - Эта справка\n"
-        "/stats - Статистика бота\n"
-        "/context - Показать текущий контекст\n"
-        "/clear - Очистить контекст и историю шуток\n\n"
-        "**Как я работаю:**\n"
-        "- Отвечаю на сообщения язвительно и зло\n"
-        "- Помню последние сообщения\n"
-        "- Не повторяю одни и те же шутки\n"
-        "- Могу сам начать разговор\n"
-        "- Подкалываю друзей по их слабостям\n\n"
-        "Просто пиши - я отвечу!"
-    )
-    await update.message.reply_text(help_msg)
+    """Handle /help command - show help message."""
+    try:
+        help_msg = (
+            "**Команды:**\n\n"
+            "/start - Начать работу\n"
+            "/help - Эта справка\n"
+            "/stats - Статистика бота\n"
+            "/context - Показать текущий контекст\n"
+            "/clear - Очистить контекст и историю шуток\n\n"
+            "**Как я работаю:**\n"
+            "- Отвечаю на сообщения\n"
+            "- Помню последние сообщения\n"
+            "- Не повторяю одни и те же шутки\n"
+            "- Могу сам начать разговор\n\n"
+            "Просто пиши - я отвечу!"
+        )
+        await update.message.reply_text(help_msg)
+    except Exception as e:
+        logging.error(f"Error in cmd_help: {e}")
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /stats command - display bot statistics."""
-    metrics = bot_metrics
-    uptime = datetime.now() - metrics['start_time']
-    hours = int(uptime.total_seconds() // 3600)
-    minutes = int((uptime.total_seconds() % 3600) // 60)
-    
-    stats_msg = (
-        f"**📊 СТАТИСТИКА ФУНТА**\n\n"
-        f"⏱ Работает: {hours}ч {minutes}м\n\n"
-        f"💬 Сообщения:\n"
-        f"  • Всего: {metrics['total_messages']}\n"
-        f"  • От пользователей: {metrics['user_messages']}\n"
-        f"  • От меня: {metrics['bot_messages']}\n"
-        f"  • Проактивных: {metrics['proactive_messages']}\n\n"
-        f"🤖 API:\n"
-        f"  • Вызовов: {metrics['api_calls']}\n"
-        f"  • Ошибок: {metrics['api_errors']}\n\n"
-        f"😂 Шутки:\n"
-        f"  • Использовано: {metrics['jokes_used']}\n"
-    )
-    
-    if metrics['user_messages'] > 0:
-        jokes_per_msg = metrics['jokes_used'] / metrics['user_messages']
-        stats_msg += f"  • На сообщение: {jokes_per_msg:.2f}\n"
-    
-    await update.message.reply_text(stats_msg)
+    """Handle /stats command - show bot statistics."""
+    try:
+        metrics = bot_metrics
+        uptime = datetime.now() - metrics['start_time']
+        hours = int(uptime.total_seconds() // 3600)
+        minutes = int((uptime.total_seconds() % 3600) // 60)
+        stats_msg = (
+            f"**📊 СТАТИСТИКА ФУНТА**\n\n"
+            f"⏱ Работает: {hours}ч {minutes}м\n\n"
+            f"💬 Сообщения:\n"
+            f"  • Всего: {metrics['total_messages']}\n"
+            f"  • От пользователей: {metrics['user_messages']}\n"
+            f"  • От меня: {metrics['bot_messages']}\n"
+            f"  • Провакативных: {metrics['proactive_messages']}\n\n"
+            f"🧠 API:\n"
+            f"  • Вызовов: {metrics['api_calls']}\n"
+            f"  • Ошибок: {metrics['api_errors']}\n\n"
+            f"😂 Шутки:\n"
+            f"  • Использовано: {metrics['jokes_used']}\n"
+        )
+        if metrics['user_messages'] > 0:
+            jokes_per_msg = metrics['jokes_used'] / metrics['user_messages']
+            stats_msg += f"  • На сообщение: {jokes_per_msg:.2f}\n"
+        await update.message.reply_text(stats_msg)
+    except Exception as e:
+        logging.error(f"Error in cmd_stats: {e}")
 
 async def cmd_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /context command - show recent conversation history."""
-    if not funt_recent_replies:
-        await update.message.reply_text("Контекст пуст.")
-        return
-    
-    context_msg = "**📜 ТЕКУЩИЙ КОНТЕКСТ:**\n\n"
-    context_msg += "\n".join(funt_recent_replies[-10:])  # Последние 10 сообщений
-    
-    # Telegram ограничивает длину сообщений
-    if len(context_msg) > 4000:
-        context_msg = context_msg[:3900] + "\n\n... (обрезано)"
-    
-    await update.message.reply_text(context_msg)
+    """Handle /context command - show conversation context."""
+    try:
+        if not funt_recent_replies:
+            await update.message.reply_text("Контекст пуст.")
+            return
+        context_msg = "**📜 ТЕКУЩИЙ КОНТЕКСТ:**\n\n"
+        context_msg += "\n".join(funt_recent_replies[-10:])
+        if len(context_msg) > 4000:
+            context_msg = context_msg[:3900] + "\n\n... (обрезано)"
+        await update.message.reply_text(context_msg)
+    except Exception as e:
+        logging.error(f"Error in cmd_context: {e}")
 
 async def cmd_clear_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /clear command - clear conversation history and jokes."""
-    funt_recent_replies.clear()
-    used_jokes['taunt_vectors'].clear()
-    used_jokes['anecdotes'].clear()
-    
-    logging.info("Контекст очищен по команде")
-    await update.message.reply_text("Контекст и история шуток очищены. Начинаем с чистого листа.")
+    """Handle /clear command - clear conversation context and joke history."""
+    try:
+        funt_recent_replies.clear()
+        used_jokes['taunt_vectors'].clear()
+        used_jokes['anecdotes'].clear()
+        await update.message.reply_text("Контекст и история шуток очищены. Начинаем с чистого листа.")
+    except Exception as e:
+        logging.error(f"Error in cmd_clear_context: {e}")
 
 async def cmd_mood(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /mood command - display current mood status."""
-    current_mood = mood_system.get_current_mood()
-    intensity = mood_system.get_current_intensity()
-    
-    if not current_mood or mood_system.current_event is None:
-        mood_msg = "🌀 Нет активного настроения. Фунт в нормальном состоянии."
-    else:
-        event = mood_system.current_event
-        remaining_time = 0.0
-        if event.created_at:
-            remaining_time = max(0, event.duration_hours - (datetime.now() - event.created_at).total_seconds() / 3600)
-        mood_msg = (
-            f"🎭 **ТЕКУЩЕЕ НАСТРОЕНИЕ**\n\n"
-            f"Тип: {current_mood}\n"
-            f"Интенсивность: {intensity:.0%}\n\n"
-            f"📖 Событие:\n{event.event_text}\n\n"
-            f"📝 Детали:\n{event.details}\n\n"
-            f"⏰ Длится еще: {remaining_time:.1f}ч"
-        )
-    
-    await update.message.reply_text(mood_msg)
+    """Handle /mood command - show current mood status."""
+    try:
+        current_mood = mood_system.get_current_mood()
+        intensity = mood_system.get_current_intensity()
+        if not current_mood or mood_system.current_event is None:
+            mood_msg = "🌀 Нет активного настроения. Фунт в нормальном состоянии."
+        else:
+            event = mood_system.current_event
+            remaining_time = 0.0
+            if event.created_at:
+                remaining_time = max(0, event.duration_hours - (datetime.now() - event.created_at).total_seconds() / 3600)
+            mood_msg = (
+                f"🎭 **ТЕКУЩЕЕ НАСТРОЕНИЕ**\n\n"
+                f"Тип: {current_mood}\n"
+                f"Интенсивность: {intensity:.0%}\n\n"
+                f"📖 Событие:\n{event.event_text}\n\n"
+                f"📝 Детали:\n{event.details}\n\n"
+                f"⏰ Длится еще: {remaining_time:.1f}ч"
+            )
+        await update.message.reply_text(mood_msg)
+    except Exception as e:
+        logging.error(f"Error in cmd_mood: {e}")
 
 # ─── Обработка сообщений ─────────────────────────────
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1134,6 +1191,32 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user = update.message.from_user
     user_id = f"@{user.username}" if user and user.username else (user.first_name if user else "Аноним")
     
+    # ═══ ПРОВЕРКА: Если видим "фунт забей свое ебало" → молчим 5 минут ═══
+    global silence_until
+    
+    # Более гибкая проверка: удаляем пунктуацию, лишние пробелы и заменяем ё на е
+    cleaned_text = lower_text.replace('ё', 'е')  # Заменяем ё на е
+    cleaned_text = re.sub(r'[,\.!?;:\'"()-]+', '', cleaned_text)
+    cleaned_text = ' '.join(cleaned_text.split())  # Нормализуем пробелы
+    
+    # Проверяем наличие ключевых слов (ебало/ебло/еба - вариации опечаток)
+    if 'фунт' in cleaned_text and 'забей' in cleaned_text and 'свое' in cleaned_text and ('ебало' in cleaned_text or 'ебло' in cleaned_text or 'еба' in cleaned_text):
+        silence_until = datetime.now() + timedelta(minutes=5)
+        logging.info(f"🤐 МОЛЧАНИЕ АКТИВИРОВАНО НА 5 МИНУТ от {user_id}")
+        # Не отвечаем вообще
+        return
+    
+    # ═══ ПРОВЕРКА: Если время молчания истекло ═══
+    if silence_until and datetime.now() > silence_until:
+        silence_until = None
+        logging.info("🔊 МОЛЧАНИЕ ЗАВЕРШЕНО, ФУНТ СНОВА ГОВОРИТ")
+    
+    # ═══ ЕСЛИ ЕЩЕ МОЛЧИМ - НЕ ОТВЕЧАЕМ ═══
+    if silence_until and datetime.now() < silence_until:
+        remaining = (silence_until - datetime.now()).total_seconds() / 60
+        logging.info(f"🤐 Фунт молчит еще {remaining:.1f} минут")
+        return
+    
     # Обновляем метрики
     bot_metrics['total_messages'] += 1
     bot_metrics['user_messages'] += 1
@@ -1146,10 +1229,9 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     if is_reply_to_funt:
         original = update.message.reply_to_message.text if update.message.reply_to_message.text else ""
-        full_context = f"Фунт ранее написал:\n{original}\n\nОтвет от {user_id}:\n{lower_text}"
+        full_context = f"Ответ {user_id} на сообщение Фунта:\n{original}\n\n{user_id}: {lower_text}"
     else:
-        # ОБЯЗАТЕЛЬНО добавляем автора, чтобы бот не путал людей
-        full_context = f"Сообщение от {user_id}: {lower_text}"
+        full_context = f"[{user_id}]: {lower_text}"
 
     mention = "фунт" in lower_text
     
@@ -1163,7 +1245,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         logging.info(f"💬 Прямое обращение от {user_id}")
     
     # 2. Иначе - рандомная вероятность (20% шанс)
-    elif random.random() < 0.2:
+    elif random.random() < 0.1:  # 10% шанс
         should_respond = True
         logging.info(f"🎲 Случайная реакция на сообщение от {user_id}")
     
@@ -1181,13 +1263,28 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     # Генерируем ответ если нужно
     if should_respond:
-        instruction = "\n\n❗️Отвечай только этому человеку. Не упоминай других участников чата."
-        resp = await generate_funt_response(full_context + instruction)
+        # Настраиваем контекст: добавляем историю сообщений из памяти
+        history_context = ""
+        if funt_recent_replies:
+            history_context = "\n\nКонтекст разговора:\n" + "\n".join(funt_recent_replies[-10:])
+        
+        instruction = "\n\n❗️Отвечай всем читающим. Подъебывай и стебись над всеми, кого можешь."
+        resp = await generate_funt_response(full_context + history_context + instruction)
         
         # Обновляем метрики
         bot_metrics['bot_messages'] += 1
         
+        # Добавляем сообщение в память
+        funt_recent_replies.append(f"[{user_id}]: {lower_text}")
+        if len(funt_recent_replies) > MAX_HISTORY:
+            funt_recent_replies.pop(0)
+        
         await update.message.reply_text(resp)
+    else:
+        # Если не отвечаем – все равно регистрируем сообщение в память
+        funt_recent_replies.append(f"[{user_id}]: {lower_text}")
+        if len(funt_recent_replies) > MAX_HISTORY:
+            funt_recent_replies.pop(0)
 
 # ─── Основной запуск ─────────────────────────────────
 async def main():

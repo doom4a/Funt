@@ -8,14 +8,34 @@
 
 ## 🚀 Быстрый старт
 
-### 1. Убедитесь, что виртуальное окружение активно
+### 1. Клонирование и настройка
 ```bash
+git clone https://github.com/doom4a/Funt.git
+cd Funt
+```
+
+### 2. Создание виртуального окружения
+```bash
+python3 -m venv myenv
 source myenv/bin/activate  # На macOS/Linux
 # или
 myenv\Scripts\activate  # На Windows
 ```
 
-### 2. Запустите бота
+### 3. Установка зависимостей
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Настройка переменных окружения
+Создайте файл `.env` в корне проекта:
+```env
+TELEGRAM_TOKEN=your_telegram_bot_token
+DEEPSEEK_API_KEY=your_deepseek_api_key
+CHAT_ID=your_chat_id
+```
+
+### 5. Запустите бота
 ```bash
 ./start_bot.sh
 ```
@@ -25,10 +45,29 @@ myenv\Scripts\activate  # На Windows
 python Funt_2.0.py
 ```
 
-### 3. Остановите бота
+### 6. Остановите бота
 ```bash
 ./stop_bot.sh
 ```
+
+---
+
+## 🛠️ Технические улучшения (v2.0.1)
+
+### ✅ Исправления стабильности:
+- Добавлены try/except блоки во все async-функции
+- Бот больше не падает при ошибках API
+- Валидация переменных окружения при запуске
+
+### ⚡ Оптимизации:
+- Убраны блокирующие вызовы (requests → httpx.AsyncClient)
+- Удалена нерабочая система анти-повторов
+- Сокращено количество лишних API-запросов
+
+### 🔒 Безопасность:
+- `.env` файл исключён из Git
+- `.vscode/` с паролями SFTP исключён из Git
+- Чёткие сообщения об ошибках конфигурации
 
 ---
 
